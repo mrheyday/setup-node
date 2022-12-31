@@ -1,16 +1,22 @@
 import * as core from '@actions/core';
 import * as io from '@actions/io';
 import * as tc from '@actions/tool-cache';
+import * as exec from '@actions/exec';
 import * as im from '../src/installer';
+import * as cache from '@actions/cache';
+import * as httpm from '@actions/http-client';
 import fs from 'fs';
 import cp from 'child_process';
-import osm = require('os');
+import osm from 'os';
 import path from 'path';
+import each from 'jest-each';
 import * as main from '../src/main';
 import * as auth from '../src/authutil';
 
-let nodeTestManifest = require('./data/versions-manifest.json');
-let nodeTestDist = require('./data/node-dist-index.json');
+const nodeTestManifest = require('./data/versions-manifest.json');
+const nodeTestDist = require('./data/node-dist-index.json');
+const nodeTestDistNightly = require('./data/node-nightly-index.json');
+const nodeTestDistRc = require('./data/node-rc-index.json');
 
 describe('setup-node', () => {
   let inputs = {} as any;
@@ -18,6 +24,7 @@ describe('setup-node', () => {
 
   let inSpy: jest.SpyInstance;
   let findSpy: jest.SpyInstance;
+  let findAllVersionsSpy: jest.SpyInstance;
   let cnSpy: jest.SpyInstance;
   let logSpy: jest.SpyInstance;
   let warningSpy: jest.SpyInstance;
@@ -36,11 +43,15 @@ describe('setup-node', () => {
   let execSpy: jest.SpyInstance;
   let authSpy: jest.SpyInstance;
   let parseNodeVersionSpy: jest.SpyInstance;
+  let isCacheActionAvailable: jest.SpyInstance;
+  let getExecOutputSpy: jest.SpyInstance;
+  let getJsonSpy: jest.SpyInstance;
 
   beforeEach(() => {
     // @actions/core
     console.log('::stop-commands::stoptoken'); // Disable executing of runner commands when running tests in actions
     process.env['GITHUB_PATH'] = ''; // Stub out ENV file functionality so we can verify it writes to standard out
+    process.env['GITHUB_OUTPUT'] = ''; // Stub out ENV file functionality so we can verify it writes to standard out
     inputs = {};
     inSpy = jest.spyOn(core, 'getInput');
     inSpy.mockImplementation(name => inputs[name]);
@@ -55,6 +66,7 @@ describe('setup-node', () => {
 
     // @actions/tool-cache
     findSpy = jest.spyOn(tc, 'find');
+    findAllVersionsSpy = jest.spyOn(tc, 'findAllVersions');
     dlSpy = jest.spyOn(tc, 'downloadTool');
     exSpy = jest.spyOn(tc, 'extractTar');
     cacheSpy = jest.spyOn(tc, 'cacheDir');
@@ -62,10 +74,16 @@ describe('setup-node', () => {
     getDistSpy = jest.spyOn(im, 'getVersionsFromDist');
     parseNodeVersionSpy = jest.spyOn(im, 'parseNodeVersionFile');
 
+    // http-client
+    getJsonSpy = jest.spyOn(httpm.HttpClient.prototype, 'getJson');
+
     // io
     whichSpy = jest.spyOn(io, 'which');
     existsSpy = jest.spyOn(fs, 'existsSync');
     mkdirpSpy = jest.spyOn(io, 'mkdirP');
+
+    // @actions/tool-cache
+    isCacheActionAvailable = jest.spyOn(cache, 'isFeatureAvailable');
 
     // disable authentication portion for installer tests
     authSpy = jest.spyOn(auth, 'configAuthentication');
@@ -75,7 +93,30 @@ describe('setup-node', () => {
     getManifestSpy.mockImplementation(
       () => <tc.IToolRelease[]>nodeTestManifest
     );
-    getDistSpy.mockImplementation(() => <im.INodeVersion>nodeTestDist);
+
+    getDistSpy.mockImplementation(version => {
+      const initialUrl = im.getNodejsDistUrl(version);
+      if (initialUrl.endsWith('/rc')) {
+        return <im.INodeVersion>nodeTestDistRc;
+      } else if (initialUrl.endsWith('/nightly')) {
+        return <im.INodeVersion>nodeTestDistNightly;
+      } else {
+        return <im.INodeVersion>nodeTestDist;
+      }
+    });
+
+    getJsonSpy.mockImplementation(url => {
+      let res: any;
+      if (url.includes('/rc')) {
+        res = <im.INodeVersion>nodeTestDistRc;
+      } else if (url.includes('/nightly')) {
+        res = <im.INodeVersion>nodeTestDistNightly;
+      } else {
+        res = <im.INodeVersion>nodeTestDist;
+      }
+
+      return {result: res};
+    });
 
     // writes
     cnSpy = jest.spyOn(process.stdout, 'write');
@@ -98,6 +139,10 @@ describe('setup-node', () => {
       // uncomment to debug
       // process.stderr.write('log:' + line + '\n');
     });
+
+    // @actions/exec
+    getExecOutputSpy = jest.spyOn(exec, 'getExecOutput');
+    getExecOutputSpy.mockImplementation(() => 'v16.15.0');
   });
 
   afterEach(() => {
@@ -121,59 +166,38 @@ describe('setup-node', () => {
       'mocktoken'
     );
     expect(versions).toBeDefined();
-    expect(versions?.length).toBe(6);
+    expect(versions?.length).toBe(7);
   });
 
   it('can mock dist versions', async () => {
-    let versions: im.INodeVersion[] = await im.getVersionsFromDist();
+    const versionSpec = '1.2.3';
+    let versions: im.INodeVersion[] = await im.getVersionsFromDist(versionSpec);
     expect(versions).toBeDefined();
     expect(versions?.length).toBe(23);
   });
 
-  it('can find 12.16.2 from manifest on osx', async () => {
-    os.platform = 'darwin';
-    os.arch = 'x64';
-    let versions: tc.IToolRelease[] | null = await tc.getManifestFromRepo(
-      'actions',
-      'node-versions',
-      'mocktoken'
-    );
-    expect(versions).toBeDefined();
-    let match = await tc.findFromManifest('12.16.2', true, versions);
-    expect(match).toBeDefined();
-    expect(match?.version).toBe('12.16.2');
-    expect((match as any).lts).toBe('Erbium');
-  });
-
-  it('can find 12 from manifest on linux', async () => {
-    os.platform = 'linux';
-    os.arch = 'x64';
-    let versions: tc.IToolRelease[] | null = await tc.getManifestFromRepo(
-      'actions',
-      'node-versions',
-      'mocktoken'
-    );
-    expect(versions).toBeDefined();
-    let match = await tc.findFromManifest('12.16.2', true, versions);
-    expect(match).toBeDefined();
-    expect(match?.version).toBe('12.16.2');
-    expect((match as any).lts).toBe('Erbium');
-  });
-
-  it('can find 10 from manifest on windows', async () => {
-    os.platform = 'win32';
-    os.arch = 'x64';
-    let versions: tc.IToolRelease[] | null = await tc.getManifestFromRepo(
-      'actions',
-      'node-versions',
-      'mocktoken'
-    );
-    expect(versions).toBeDefined();
-    let match = await tc.findFromManifest('10', true, versions);
-    expect(match).toBeDefined();
-    expect(match?.version).toBe('10.20.1');
-    expect((match as any).lts).toBe('Dubnium');
-  });
+  it.each([
+    ['12.16.2', 'darwin', '12.16.2', 'Erbium'],
+    ['12', 'linux', '12.16.2', 'Erbium'],
+    ['10', 'win32', '10.20.1', 'Dubnium'],
+    ['*', 'linux', '14.0.0', 'Fermium']
+  ])(
+    'can find %s from manifest on %s',
+    async (versionSpec, platform, expectedVersion, expectedLts) => {
+      os.platform = platform;
+      os.arch = 'x64';
+      let versions: tc.IToolRelease[] | null = await tc.getManifestFromRepo(
+        'actions',
+        'node-versions',
+        'mocktoken'
+      );
+      expect(versions).toBeDefined();
+      let match = await tc.findFromManifest(versionSpec, true, versions);
+      expect(match).toBeDefined();
+      expect(match?.version).toBe(expectedVersion);
+      expect((match as any).lts).toBe(expectedLts);
+    }
+  );
 
   //--------------------------------------------------
   // Found in cache tests
@@ -245,7 +269,7 @@ describe('setup-node', () => {
     inputs['token'] = 'faketoken';
 
     let expectedUrl =
-      'https://github.com/actions/node-versions/releases/download/12.16.2-20200423.28/node-12.16.2-linux-x64.tar.gz';
+      'https://github.com/actions/node-versions/releases/download/12.16.2-20200507.95/node-12.16.2-linux-x64.tar.gz';
 
     // ... but not in the local cache
     findSpy.mockImplementation(() => '');
@@ -259,6 +283,21 @@ describe('setup-node', () => {
 
     let expPath = path.join(toolPath, 'bin');
 
+    expect(getExecOutputSpy).toHaveBeenCalledWith(
+      'node',
+      ['--version'],
+      expect.anything()
+    );
+    expect(getExecOutputSpy).toHaveBeenCalledWith(
+      'npm',
+      ['--version'],
+      expect.anything()
+    );
+    expect(getExecOutputSpy).toHaveBeenCalledWith(
+      'yarn',
+      ['--version'],
+      expect.anything()
+    );
     expect(dlSpy).toHaveBeenCalled();
     expect(exSpy).toHaveBeenCalled();
     expect(logSpy).toHaveBeenCalledWith(
@@ -283,7 +322,7 @@ describe('setup-node', () => {
     inputs['token'] = 'faketoken';
 
     let expectedUrl =
-      'https://github.com/actions/node-versions/releases/download/12.16.2-20200423.28/node-12.16.2-linux-x64.tar.gz';
+      'https://github.com/actions/node-versions/releases/download/12.16.2-20200507.95/node-12.16.2-linux-x64.tar.gz';
 
     // ... but not in the local cache
     findSpy.mockImplementation(() => '');
@@ -452,7 +491,7 @@ describe('setup-node', () => {
       exSpy.mockImplementation(async () => '/some/other/temp/path');
       cacheSpy.mockImplementation(async () => toolPath);
       const expectedUrl =
-        'https://github.com/actions/node-versions/releases/download/12.16.2-20200423.28/node-12.16.2-linux-x64.tar.gz';
+        'https://github.com/actions/node-versions/releases/download/12.16.2-20200507.95/node-12.16.2-linux-x64.tar.gz';
 
       await main.run();
 
@@ -589,6 +628,34 @@ describe('setup-node', () => {
       existsSpy.mockImplementationOnce(
         input => input === path.join(__dirname, 'data', versionFile)
       );
+
+      // Act
+      await main.run();
+
+      // Assert
+      expect(existsSpy).toHaveBeenCalledTimes(1);
+      expect(existsSpy).toHaveReturnedWith(true);
+      expect(parseNodeVersionSpy).toHaveBeenCalledWith(versionSpec);
+      expect(logSpy).toHaveBeenCalledWith(
+        `Resolved ${versionFile} as ${expectedVersionSpec}`
+      );
+    });
+
+    it('reads package.json as node-version-file if provided', async () => {
+      // Arrange
+      const versionSpec = fs.readFileSync(
+        path.join(__dirname, 'data/package.json'),
+        'utf-8'
+      );
+      const versionFile = 'package.json';
+      const expectedVersionSpec = '14';
+      process.env['GITHUB_WORKSPACE'] = path.join(__dirname, 'data');
+      inputs['node-version-file'] = versionFile;
+
+      parseNodeVersionSpy.mockImplementation(() => expectedVersionSpec);
+      existsSpy.mockImplementationOnce(
+        input => input === path.join(__dirname, 'data', versionFile)
+      );
       // Act
       await main.run();
 
@@ -644,6 +711,50 @@ describe('setup-node', () => {
       );
     });
   });
+
+  describe('cache on GHES', () => {
+    it('Should throw an error, because cache is not supported', async () => {
+      inputs['node-version'] = '12';
+      inputs['cache'] = 'npm';
+
+      inSpy.mockImplementation(name => inputs[name]);
+
+      let toolPath = path.normalize('/cache/node/12.16.1/x64');
+      findSpy.mockImplementation(() => toolPath);
+
+      // expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+      process.env['GITHUB_SERVER_URL'] = 'https://www.test.com';
+      isCacheActionAvailable.mockImplementation(() => false);
+
+      await main.run();
+
+      expect(warningSpy).toHaveBeenCalledWith(
+        //  `::error::Cache action is only supported on GHES version >= 3.5. If you are on version >=3.5 Please check with GHES admin if Actions cache service is enabled or not.${osm.EOL}`
+        'Cache action is only supported on GHES version >= 3.5. If you are on version >=3.5 Please check with GHES admin if Actions cache service is enabled or not.'
+      );
+    });
+
+    it('Should throw an internal error', async () => {
+      inputs['node-version'] = '12';
+      inputs['cache'] = 'npm';
+
+      inSpy.mockImplementation(name => inputs[name]);
+
+      let toolPath = path.normalize('/cache/node/12.16.1/x64');
+      findSpy.mockImplementation(() => toolPath);
+
+      // expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+      process.env['GITHUB_SERVER_URL'] = '';
+      isCacheActionAvailable.mockImplementation(() => false);
+
+      await main.run();
+
+      expect(warningSpy).toHaveBeenCalledWith(
+        'The runner was not able to contact the cache service. Caching will be skipped'
+      );
+    });
+  });
+
   describe('LTS version', () => {
     beforeEach(() => {
       os.platform = 'linux';
@@ -651,145 +762,102 @@ describe('setup-node', () => {
       inputs.stable = 'true';
     });
 
-    it('find latest LTS version and resolve it from local cache (lts/erbium)', async () => {
-      // arrange
-      inputs['node-version'] = 'lts/erbium';
+    it.each([
+      ['erbium', '12.16.2'],
+      ['*', '14.0.0'],
+      ['-1', '12.16.2']
+    ])(
+      'find latest LTS version and resolve it from local cache (lts/%s)',
+      async (lts, expectedVersion) => {
+        // arrange
+        inputs['node-version'] = `lts/${lts}`;
 
-      const toolPath = path.normalize('/cache/node/12.16.2/x64');
-      findSpy.mockReturnValue(toolPath);
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+        findSpy.mockReturnValue(toolPath);
 
-      // act
-      await main.run();
+        // act
+        await main.run();
 
-      // assert
-      expect(logSpy).toHaveBeenCalledWith(
-        'Attempt to resolve LTS alias from manifest...'
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        'Getting manifest from actions/node-versions@main'
-      );
-      expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `LTS alias 'erbium' for Node version 'lts/erbium'`
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `Found LTS release '12.16.2' for Node version 'lts/erbium'`
-      );
-      expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
-      expect(cnSpy).toHaveBeenCalledWith(
-        `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
-      );
-    });
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(
+          'Attempt to resolve LTS alias from manifest...'
+        );
+        expect(dbgSpy).toHaveBeenCalledWith(
+          'Getting manifest from actions/node-versions@main'
+        );
+        expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
+        expect(dbgSpy).toHaveBeenCalledWith(
+          `LTS alias '${lts}' for Node version 'lts/${lts}'`
+        );
+        expect(dbgSpy).toHaveBeenCalledWith(
+          `Found LTS release '${expectedVersion}' for Node version 'lts/${lts}'`
+        );
+        expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
 
-    it('find latest LTS version and install it from manifest (lts/erbium)', async () => {
-      // arrange
-      inputs['node-version'] = 'lts/erbium';
+    it.each([
+      [
+        'erbium',
+        '12.16.2',
+        'https://github.com/actions/node-versions/releases/download/12.16.2-20200507.95/node-12.16.2-linux-x64.tar.gz'
+      ],
+      [
+        '*',
+        '14.0.0',
+        'https://github.com/actions/node-versions/releases/download/14.0.0-20200507.99/node-14.0.0-linux-x64.tar.gz'
+      ],
+      [
+        '-1',
+        '12.16.2',
+        'https://github.com/actions/node-versions/releases/download/12.16.2-20200507.95/node-12.16.2-linux-x64.tar.gz'
+      ]
+    ])(
+      'find latest LTS version and install it from manifest (lts/%s)',
+      async (lts, expectedVersion, expectedUrl) => {
+        // arrange
+        inputs['node-version'] = `lts/${lts}`;
 
-      const toolPath = path.normalize('/cache/node/12.16.2/x64');
-      findSpy.mockImplementation(() => '');
-      dlSpy.mockImplementation(async () => '/some/temp/path');
-      exSpy.mockImplementation(async () => '/some/other/temp/path');
-      cacheSpy.mockImplementation(async () => toolPath);
-      const expectedUrl =
-        'https://github.com/actions/node-versions/releases/download/12.16.2-20200423.28/node-12.16.2-linux-x64.tar.gz';
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+        findSpy.mockImplementation(() => '');
+        dlSpy.mockImplementation(async () => '/some/temp/path');
+        exSpy.mockImplementation(async () => '/some/other/temp/path');
+        cacheSpy.mockImplementation(async () => toolPath);
+        const expectedMajor = expectedVersion.split('.')[0];
 
-      // act
-      await main.run();
+        // act
+        await main.run();
 
-      // assert
-      expect(logSpy).toHaveBeenCalledWith(
-        'Attempt to resolve LTS alias from manifest...'
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        'Getting manifest from actions/node-versions@main'
-      );
-      expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `LTS alias 'erbium' for Node version 'lts/erbium'`
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `Found LTS release '12.16.2' for Node version 'lts/erbium'`
-      );
-      expect(logSpy).toHaveBeenCalledWith('Attempting to download 12...');
-      expect(logSpy).toHaveBeenCalledWith(
-        `Acquiring 12.16.2 - ${os.arch} from ${expectedUrl}`
-      );
-      expect(logSpy).toHaveBeenCalledWith('Extracting ...');
-      expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
-      expect(cnSpy).toHaveBeenCalledWith(
-        `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
-      );
-    });
-
-    it('find latest LTS version and resolve it from local cache (lts/*)', async () => {
-      // arrange
-      inputs['node-version'] = 'lts/*';
-
-      const toolPath = path.normalize('/cache/node/14.0.0/x64');
-      findSpy.mockReturnValue(toolPath);
-
-      // act
-      await main.run();
-
-      // assert
-      expect(logSpy).toHaveBeenCalledWith(
-        'Attempt to resolve LTS alias from manifest...'
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        'Getting manifest from actions/node-versions@main'
-      );
-      expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `LTS alias '*' for Node version 'lts/*'`
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `Found LTS release '14.0.0' for Node version 'lts/*'`
-      );
-      expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
-      expect(cnSpy).toHaveBeenCalledWith(
-        `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
-      );
-    });
-
-    it('find latest LTS version and install it from manifest (lts/*)', async () => {
-      // arrange
-      inputs['node-version'] = 'lts/*';
-
-      const toolPath = path.normalize('/cache/node/14.0.0/x64');
-      findSpy.mockImplementation(() => '');
-      dlSpy.mockImplementation(async () => '/some/temp/path');
-      exSpy.mockImplementation(async () => '/some/other/temp/path');
-      cacheSpy.mockImplementation(async () => toolPath);
-      const expectedUrl =
-        'https://github.com/actions/node-versions/releases/download/14.0.0-20200423.30/node-14.0.0-linux-x64.tar.gz';
-
-      // act
-      await main.run();
-
-      // assert
-      expect(logSpy).toHaveBeenCalledWith(
-        'Attempt to resolve LTS alias from manifest...'
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        'Getting manifest from actions/node-versions@main'
-      );
-      expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `LTS alias '*' for Node version 'lts/*'`
-      );
-      expect(dbgSpy).toHaveBeenCalledWith(
-        `Found LTS release '14.0.0' for Node version 'lts/*'`
-      );
-      expect(logSpy).toHaveBeenCalledWith('Attempting to download 14...');
-      expect(logSpy).toHaveBeenCalledWith(
-        `Acquiring 14.0.0 - ${os.arch} from ${expectedUrl}`
-      );
-      expect(logSpy).toHaveBeenCalledWith('Extracting ...');
-      expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
-      expect(cnSpy).toHaveBeenCalledWith(
-        `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
-      );
-    });
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(
+          'Attempt to resolve LTS alias from manifest...'
+        );
+        expect(dbgSpy).toHaveBeenCalledWith(
+          'Getting manifest from actions/node-versions@main'
+        );
+        expect(dbgSpy).not.toHaveBeenCalledWith('No manifest cached');
+        expect(dbgSpy).toHaveBeenCalledWith(
+          `LTS alias '${lts}' for Node version 'lts/${lts}'`
+        );
+        expect(dbgSpy).toHaveBeenCalledWith(
+          `Found LTS release '${expectedVersion}' for Node version 'lts/${lts}'`
+        );
+        expect(logSpy).toHaveBeenCalledWith(
+          `Attempting to download ${expectedMajor}...`
+        );
+        expect(logSpy).toHaveBeenCalledWith(
+          `Acquiring ${expectedVersion} - ${os.arch} from ${expectedUrl}`
+        );
+        expect(logSpy).toHaveBeenCalledWith('Extracting ...');
+        expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
 
     it('fail with unable to parse LTS alias (lts/)', async () => {
       // arrange
@@ -859,6 +927,350 @@ describe('setup-node', () => {
       expect(cnSpy).toHaveBeenCalledWith(
         `::error::Unable to download manifest${osm.EOL}`
       );
+    });
+  });
+
+  describe('rc versions', () => {
+    it.each([
+      [
+        '13.10.1-rc.0',
+        '13.10.1-rc.0',
+        'https://nodejs.org/download/rc/v13.10.1-rc.0/node-v13.10.1-rc.0-linux-x64.tar.gz'
+      ],
+      [
+        '14.15.5-rc.1',
+        '14.15.5-rc.1',
+        'https://nodejs.org/download/rc/v14.15.5-rc.1/node-v14.15.5-rc.1-linux-x64.tar.gz'
+      ],
+      [
+        '16.17.0-rc.1',
+        '16.17.0-rc.1',
+        'https://nodejs.org/download/rc/v16.17.0-rc.1/node-v16.17.0-rc.1-linux-x64.tar.gz'
+      ],
+      [
+        '17.0.0-rc.1',
+        '17.0.0-rc.1',
+        'https://nodejs.org/download/rc/v17.0.0-rc.1/node-v17.0.0-rc.1-linux-x64.tar.gz'
+      ],
+      [
+        '19.0.0-rc.2',
+        '19.0.0-rc.2',
+        'https://nodejs.org/download/rc/v19.0.0-rc.2/node-v19.0.0-rc.2-linux-x64.tar.gz'
+      ]
+    ])(
+      'finds the versions in the index.json and installs it',
+      async (input, expectedVersion, expectedUrl) => {
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+
+        findSpy.mockImplementation(() => '');
+        findAllVersionsSpy.mockImplementation(() => []);
+        dlSpy.mockImplementation(async () => '/some/temp/path');
+        exSpy.mockImplementation(async () => '/some/other/temp/path');
+        cacheSpy.mockImplementation(async () => toolPath);
+
+        inputs['node-version'] = input;
+        os['arch'] = 'x64';
+        os['platform'] = 'linux';
+        // act
+        await main.run();
+
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(
+          `Attempting to download ${input}...`
+        );
+
+        expect(logSpy).toHaveBeenCalledWith(
+          `Acquiring ${expectedVersion} - ${os.arch} from ${expectedUrl}`
+        );
+        expect(logSpy).toHaveBeenCalledWith('Extracting ...');
+        expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
+
+    it.each([
+      ['13.10.1-rc.0', '13.10.1-rc.0'],
+      ['14.15.5-rc.1', '14.15.5-rc.1'],
+      ['16.17.0-rc.1', '16.17.0-rc.1'],
+      ['17.0.0-rc.1', '17.0.0-rc.1']
+    ])(
+      'finds the %s version in the hostedToolcache',
+      async (input, expectedVersion) => {
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+        findSpy.mockReturnValue(toolPath);
+
+        inputs['node-version'] = input;
+        os['arch'] = 'x64';
+        os['platform'] = 'linux';
+
+        // act
+        await main.run();
+
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
+
+    it('throws an error if version is not found', async () => {
+      const versionSpec = '19.0.0-rc.3';
+
+      findSpy.mockImplementation(() => '');
+      findAllVersionsSpy.mockImplementation(() => []);
+      dlSpy.mockImplementation(async () => '/some/temp/path');
+      exSpy.mockImplementation(async () => '/some/other/temp/path');
+
+      inputs['node-version'] = versionSpec;
+      os['arch'] = 'x64';
+      os['platform'] = 'linux';
+      // act
+      await main.run();
+
+      // assert
+      expect(logSpy).toHaveBeenCalledWith(
+        `Attempting to download ${versionSpec}...`
+      );
+      expect(cnSpy).toHaveBeenCalledWith(
+        `::error::Unable to find Node version '${versionSpec}' for platform ${os.platform} and architecture ${os.arch}.${osm.EOL}`
+      );
+    });
+  });
+
+  describe('nightly versions', () => {
+    it.each([
+      [
+        '17.5.0-nightly',
+        '17.5.0-nightly20220209e43808936a',
+        'https://nodejs.org/download/nightly/v17.5.0-nightly20220209e43808936a/node-v17.5.0-nightly20220209e43808936a-linux-x64.tar.gz'
+      ],
+      [
+        '17-nightly',
+        '17.5.0-nightly20220209e43808936a',
+        'https://nodejs.org/download/nightly/v17.5.0-nightly20220209e43808936a/node-v17.5.0-nightly20220209e43808936a-linux-x64.tar.gz'
+      ],
+      [
+        '18.0.0-nightly',
+        '18.0.0-nightly20220419bde889bd4e',
+        'https://nodejs.org/download/nightly/v18.0.0-nightly20220419bde889bd4e/node-v18.0.0-nightly20220419bde889bd4e-linux-x64.tar.gz'
+      ],
+      [
+        '18-nightly',
+        '18.0.0-nightly20220419bde889bd4e',
+        'https://nodejs.org/download/nightly/v18.0.0-nightly20220419bde889bd4e/node-v18.0.0-nightly20220419bde889bd4e-linux-x64.tar.gz'
+      ],
+      [
+        '20.0.0-nightly',
+        '20.0.0-nightly2022101987cdf7d412',
+        'https://nodejs.org/download/nightly/v20.0.0-nightly2022101987cdf7d412/node-v20.0.0-nightly2022101987cdf7d412-linux-x64.tar.gz'
+      ]
+    ])(
+      'finds the versions in the index.json and installs it',
+      async (input, expectedVersion, expectedUrl) => {
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+
+        findSpy.mockImplementation(() => '');
+        findAllVersionsSpy.mockImplementation(() => []);
+        dlSpy.mockImplementation(async () => '/some/temp/path');
+        exSpy.mockImplementation(async () => '/some/other/temp/path');
+        cacheSpy.mockImplementation(async () => toolPath);
+
+        inputs['node-version'] = input;
+        os['arch'] = 'x64';
+        os['platform'] = 'linux';
+        // act
+        await main.run();
+
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(
+          `Attempting to download ${input}...`
+        );
+
+        expect(logSpy).toHaveBeenCalledWith(
+          `Acquiring ${expectedVersion} - ${os.arch} from ${expectedUrl}`
+        );
+        expect(logSpy).toHaveBeenCalledWith('Extracting ...');
+        expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
+
+    it.each([
+      ['17.5.0-nightly', '17.5.0-nightly20220209e43808936a'],
+      ['17-nightly', '17.5.0-nightly20220209e43808936a'],
+      ['20.0.0-nightly', '20.0.0-nightly2022101987cdf7d412']
+    ])(
+      'finds the %s version in the hostedToolcache',
+      async (input, expectedVersion) => {
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+        findSpy.mockReturnValue(toolPath);
+        findAllVersionsSpy.mockReturnValue([
+          '17.5.0-nightly20220209e43808936a',
+          '17.5.0-nightly20220209e43808935a',
+          '20.0.0-nightly2022101987cdf7d412',
+          '20.0.0-nightly2022101987cdf7d411'
+        ]);
+
+        inputs['node-version'] = input;
+        os['arch'] = 'x64';
+        os['platform'] = 'linux';
+
+        // act
+        await main.run();
+
+        // assert
+        expect(findAllVersionsSpy).toHaveBeenCalled();
+        expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
+
+    it.each([
+      [
+        '17.5.0-nightly',
+        '17.5.0-nightly20220209e43808936a',
+        '17.0.0-nightly202110193f11666dc7',
+        'https://nodejs.org/download/nightly/v17.5.0-nightly20220209e43808936a/node-v17.5.0-nightly20220209e43808936a-linux-x64.tar.gz'
+      ],
+      [
+        '17-nightly',
+        '17.5.0-nightly20220209e43808936a',
+        '17.0.0-nightly202110193f11666dc7',
+        'https://nodejs.org/download/nightly/v17.5.0-nightly20220209e43808936a/node-v17.5.0-nightly20220209e43808936a-linux-x64.tar.gz'
+      ],
+      [
+        '18.0.0-nightly',
+        '18.0.0-nightly20220419bde889bd4e',
+        '18.0.0-nightly202204180699150267',
+        'https://nodejs.org/download/nightly/v18.0.0-nightly20220419bde889bd4e/node-v18.0.0-nightly20220419bde889bd4e-linux-x64.tar.gz'
+      ],
+      [
+        '18-nightly',
+        '18.0.0-nightly20220419bde889bd4e',
+        '18.0.0-nightly202204180699150267',
+        'https://nodejs.org/download/nightly/v18.0.0-nightly20220419bde889bd4e/node-v18.0.0-nightly20220419bde889bd4e-linux-x64.tar.gz'
+      ],
+      [
+        '20.0.0-nightly',
+        '20.0.0-nightly2022101987cdf7d412',
+        '20.0.0-nightly2022101987cdf7d411',
+        'https://nodejs.org/download/nightly/v20.0.0-nightly2022101987cdf7d412/node-v20.0.0-nightly2022101987cdf7d412-linux-x64.tar.gz'
+      ]
+    ])(
+      'get %s version from dist if check-latest is true',
+      async (input, expectedVersion, foundVersion, expectedUrl) => {
+        const foundToolPath = path.normalize(`/cache/node/${foundVersion}/x64`);
+        const toolPath = path.normalize(`/cache/node/${expectedVersion}/x64`);
+
+        inputs['node-version'] = input;
+        inputs['check-latest'] = 'true';
+        os['arch'] = 'x64';
+        os['platform'] = 'linux';
+
+        findSpy.mockReturnValue(foundToolPath);
+        findAllVersionsSpy.mockReturnValue([
+          '17.0.0-nightly202110193f11666dc7',
+          '18.0.0-nightly202204180699150267',
+          '20.0.0-nightly2022101987cdf7d411'
+        ]);
+        dlSpy.mockImplementation(async () => '/some/temp/path');
+        exSpy.mockImplementation(async () => '/some/other/temp/path');
+        cacheSpy.mockImplementation(async () => toolPath);
+
+        // act
+        await main.run();
+
+        // assert
+        expect(findAllVersionsSpy).toHaveBeenCalled();
+        expect(logSpy).toHaveBeenCalledWith(
+          `Acquiring ${expectedVersion} - ${os.arch} from ${expectedUrl}`
+        );
+        expect(logSpy).toHaveBeenCalledWith('Extracting ...');
+        expect(logSpy).toHaveBeenCalledWith('Adding to the cache ...');
+        expect(cnSpy).toHaveBeenCalledWith(
+          `::add-path::${path.join(toolPath, 'bin')}${osm.EOL}`
+        );
+      }
+    );
+  });
+
+  describe('latest alias syntax', () => {
+    it.each(['latest', 'current', 'node'])(
+      'download the %s version if alias is provided',
+      async inputVersion => {
+        // Arrange
+        inputs['node-version'] = inputVersion;
+
+        os.platform = 'darwin';
+        os.arch = 'x64';
+
+        findSpy.mockImplementation(() => '');
+        getManifestSpy.mockImplementation(() => {
+          throw new Error('Unable to download manifest');
+        });
+
+        // Act
+        await main.run();
+
+        // assert
+        expect(logSpy).toHaveBeenCalledWith('Unable to download manifest');
+
+        expect(logSpy).toHaveBeenCalledWith('getting latest node version...');
+      }
+    );
+  });
+
+  describe('latest alias syntax from cache', () => {
+    it.each(['latest', 'current', 'node'])(
+      'download the %s version if alias is provided',
+      async inputVersion => {
+        // Arrange
+        inputs['node-version'] = inputVersion;
+        const expectedVersion = nodeTestDist[0];
+
+        os.platform = 'darwin';
+        os.arch = 'x64';
+
+        const toolPath = path.normalize(
+          `/cache/node/${expectedVersion.version}/x64`
+        );
+        findSpy.mockReturnValue(toolPath);
+
+        // Act
+        await main.run();
+
+        // assert
+        expect(logSpy).toHaveBeenCalledWith(`Found in cache @ ${toolPath}`);
+
+        expect(logSpy).toHaveBeenCalledWith('getting latest node version...');
+      }
+    );
+  });
+});
+
+describe('helper methods', () => {
+  describe('parseNodeVersionFile', () => {
+    each`
+      contents                                     | expected
+      ${'12'}                                      | ${'12'}
+      ${'12.3'}                                    | ${'12.3'}
+      ${'12.3.4'}                                  | ${'12.3.4'}
+      ${'v12.3.4'}                                 | ${'12.3.4'}
+      ${'lts/erbium'}                              | ${'lts/erbium'}
+      ${'lts/*'}                                   | ${'lts/*'}
+      ${'nodejs 12.3.4'}                           | ${'12.3.4'}
+      ${'ruby 2.3.4\nnodejs 12.3.4\npython 3.4.5'} | ${'12.3.4'}
+      ${''}                                        | ${''}
+      ${'unknown format'}                          | ${'unknown format'}
+    `.it('parses "$contents"', ({contents, expected}) => {
+      expect(im.parseNodeVersionFile(contents)).toBe(expected);
     });
   });
 });
