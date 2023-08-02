@@ -24,7 +24,7 @@ To ensure that `yarn.lock` is always committed, use `yarn install --immutable` w
 **See also:**
 - [Documentation of `yarn.lock`](https://classic.yarnpkg.com/en/docs/yarn-lock)
 - [Documentation of `--frozen-lockfile` option](https://classic.yarnpkg.com/en/docs/cli/install#toc-yarn-install-frozen-lockfile)
-- [QA - Should lockfiles be committed to the repoistory?](https://yarnpkg.com/getting-started/qa/#should-lockfiles-be-committed-to-the-repository)
+- [QA - Should lockfiles be committed to the repository?](https://yarnpkg.com/getting-started/qa/#should-lockfiles-be-committed-to-the-repository)
 - [Documentation of `yarn install`](https://yarnpkg.com/cli/install)
 
 ### PNPM
@@ -100,6 +100,57 @@ jobs:
         with:
           node-version: '14'
           architecture: 'x64' # optional, x64 or x86. If not specified, x64 will be used by default
+      - run: npm ci
+      - run: npm test
+```
+
+## V8 Canary versions
+
+You can specify a nightly version to download it from https://nodejs.org/download/v8-canary.
+
+### Install v8 canary build for specific node version
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Node sample
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20.0.0-v8-canary' # it will install the latest v8 canary release for node 20.0.0
+      - run: npm ci
+      - run: npm test
+```
+### Install v8 canary build for major node version
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Node sample
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: '20-v8-canary' # it will install the latest v8 canary release for node 20
+      - run: npm ci
+      - run: npm test
+```
+
+### Install the exact v8 canary version
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: Node sample
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 'v20.1.1-v8-canary20221103f7e2421e91'
       - run: npm ci
       - run: npm test
 ```
@@ -210,9 +261,13 @@ steps:
   with:
     node-version: '14'
     cache: 'pnpm'
-- run: pnpm install --frozen-lockfile
+- run: pnpm install
 - run: pnpm test
 ```
+
+> **Note**: By default `--frozen-lockfile` option is passed starting from pnpm `6.10.x`. It will be automatically added if you run it on [CI](https://pnpm.io/cli/install#--frozen-lockfile). 
+> If the `pnpm-lock.yaml` file changes then pass `--frozen-lockfile` option.
+
 
 **Using wildcard patterns to cache dependencies**
 ```yaml
@@ -350,11 +405,14 @@ steps:
     yarn config set npmScopes.my-org.npmAlwaysAuth true
     yarn config set npmScopes.my-org.npmAuthToken $NPM_AUTH_TOKEN
   env:
-    NPM_AUTH_TOKEN: ${{ secrets.YARN_TOKEN }}
+    NPM_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 - name: Install dependencies
   run: yarn install --immutable
 ```
-NOTE: As per https://github.com/actions/setup-node/issues/49 you cannot use `secrets.GITHUB_TOKEN` to access private GitHub Packages within the same organisation but in a different repository.
+
+To access private GitHub Packages within the same organization, go to "Manage Actions access" in Package settings and set the repositories you want to access.
+
+Please refer to the [Ensuring workflow access to your package - Configuring a package's access control and visibility](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility#ensuring-workflow-access-to-your-package) for more details.
 
 ### always-auth input
 The always-auth input sets `always-auth=true` in .npmrc file. With this option set [npm](https://docs.npmjs.com/cli/v6/using-npm/config#always-auth)/yarn sends the authentication credentials when making a request to the registries.
