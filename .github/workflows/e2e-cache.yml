@@ -18,10 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: [12, 14, 16]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        node-version: [18, 20, 22]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Clean global cache
         run: npm cache clean --force
       - name: Setup Node
@@ -41,12 +41,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: [12, 14, 16]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        node-version: [18, 20, 22]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Install pnpm
-        uses: pnpm/action-setup@v2
+        uses: pnpm/action-setup@v4
         with:
           version: 6.10.0
       - name: Generate pnpm file
@@ -74,10 +74,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: [14, 16]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        node-version: [18, 20]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Yarn version
         run: yarn --version
       - name: Generate yarn file
@@ -93,25 +93,25 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: 'yarn'
       - name: Install dependencies
-        run: yarn install
+        run: yarn install --ignore-engines
       - name: Verify node and yarn
         run: __tests__/verify-node.sh "${{ matrix.node-version }}"
         shell: bash
 
-  node-yarn2-depencies-caching:
-    name: Test yarn 2 (Node ${{ matrix.node-version}}, ${{ matrix.os }})
+  node-yarn3-depencies-caching:
+    name: Test yarn 3 (Node ${{ matrix.node-version}}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     env:
       YARN_ENABLE_IMMUTABLE_INSTALLS: false
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        node-version: [12, 14, 16]
+        os: [ubuntu-latest, windows-latest, macos-latest, macos-13]
+        node-version: [18, 20, 22]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Update yarn
-        run: yarn set version berry
+        run: yarn set version 3.6.4
       - name: Yarn version
         run: yarn --version
       - name: Generate simple .yarnrc.yml
@@ -139,11 +139,11 @@ jobs:
     name: Test yarn subprojects
     strategy:
       matrix:
-        node-version: [12, 14, 16]
+        node-version: [18, 20, 22]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: prepare sub-projects
         run: __tests__/prepare-yarn-subprojects.sh yarn1
@@ -166,11 +166,11 @@ jobs:
     name: Test yarn subprojects all locally managed
     strategy:
       matrix:
-        node-version: [12, 14, 16]
+        node-version: [18, 20, 22]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: prepare sub-projects
         run: __tests__/prepare-yarn-subprojects.sh keepcache keepcache
@@ -193,11 +193,11 @@ jobs:
     name: Test yarn subprojects some locally managed
     strategy:
       matrix:
-        node-version: [12, 14, 16]
+        node-version: [18, 20, 22]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: prepare sub-projects
         run: __tests__/prepare-yarn-subprojects.sh global
@@ -220,11 +220,11 @@ jobs:
     name: Test yarn subprojects managed by git
     strategy:
       matrix:
-        node-version: [12, 14, 16]
+        node-version: [18, 20, 22]
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: prepare sub-projects
         run: /bin/bash __tests__/prepare-yarn-subprojects.sh keepcache

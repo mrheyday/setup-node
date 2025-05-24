@@ -8,7 +8,7 @@ inputs:
   node-version:
     description: 'Version Spec of the version to use. Examples: 12.x, 10.15.1, >=10.15.0.'
   node-version-file:
-    description: 'File containing the version Spec of the version to use.  Examples: .nvmrc, .node-version, .tool-versions.'
+    description: 'File containing the version Spec of the version to use.  Examples: package.json, .nvmrc, .node-version, .tool-versions.'
   architecture:
     description: 'Target architecture for Node to use. Examples: x86, x64. Will use system architecture by default.'
   check-latest:
@@ -25,6 +25,10 @@ inputs:
     description: 'Used to specify a package manager for caching in the default directory. Supported values: npm, yarn, pnpm.'
   cache-dependency-path:
     description: 'Used to specify the path to a dependency file: package-lock.json, yarn.lock, etc. Supports wildcards or a list of file names for caching multiple dependencies.'
+  mirror:
+    description: 'Used to specify an alternative mirror to downlooad Node.js binaries from'
+  mirror-token:
+    description: 'The token used as Authorization header when fetching from the mirror'
 # TODO: add input to control forcing to pull from cloud or dist.
 #       escape valve for someone having issues or needing the absolute latest which isn't cached yet
 outputs:
@@ -33,7 +37,7 @@ outputs:
   node-version:
     description: 'The installed node version.'
 runs:
-  using: 'node16'
+  using: 'node20'
   main: 'dist/setup/index.js'
   post: 'dist/cache-save/index.js'
   post-if: success()

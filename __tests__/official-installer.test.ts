@@ -248,6 +248,9 @@ describe('setup-node', () => {
     const toolPath = path.normalize('/cache/node/12.16.2/x64');
     exSpy.mockImplementation(async () => '/some/other/temp/path');
     cacheSpy.mockImplementation(async () => toolPath);
+    whichSpy.mockImplementation(cmd => {
+      return `some/${cmd}/path`;
+    });
 
     await main.run();
 
@@ -276,6 +279,43 @@ describe('setup-node', () => {
     expect(logSpy).toHaveBeenCalledWith(
       `Attempting to download ${versionSpec}...`
     );
+    expect(cnSpy).toHaveBeenCalledWith(`::add-path::${expPath}${osm.EOL}`);
+  });
+
+  it('falls back to a version from node dist from mirror', async () => {
+    os.platform = 'linux';
+    os.arch = 'x64';
+
+    // a version which is not in the manifest but is in node dist
+    const versionSpec = '11.15.0';
+    const mirror = 'https://my_mirror_url';
+    inputs['node-version'] = versionSpec;
+    inputs['always-auth'] = false;
+    inputs['token'] = 'faketoken';
+    inputs['mirror'] = mirror;
+    inputs['mirror-token'] = 'faketoken';
+
+    // ... but not in the local cache
+    findSpy.mockImplementation(() => '');
+
+    dlSpy.mockImplementation(async () => '/some/temp/path');
+    const toolPath = path.normalize('/cache/node/11.15.0/x64');
+    exSpy.mockImplementation(async () => '/some/other/temp/path');
+    cacheSpy.mockImplementation(async () => toolPath);
+
+    await main.run();
+
+    const expPath = path.join(toolPath, 'bin');
+
+    expect(getManifestSpy).toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith(
+      `Attempting to download ${versionSpec}...`
+    );
+    expect(logSpy).toHaveBeenCalledWith(
+      `Not found in manifest. Falling back to download directly from ${mirror}`
+    );
+    expect(dlSpy).toHaveBeenCalled();
+    expect(exSpy).toHaveBeenCalled();
     expect(cnSpy).toHaveBeenCalledWith(`::add-path::${expPath}${osm.EOL}`);
   });
 
@@ -355,6 +395,41 @@ describe('setup-node', () => {
     await main.run();
 
     expect(cnSpy).toHaveBeenCalledWith(`::error::${errMsg}${osm.EOL}`);
+  });
+
+  it('reports when download failed but version exists', async () => {
+    os.platform = 'linux';
+    os.arch = 'x64';
+
+    // a version which is not in the manifest but is in node dist
+    const versionSpec = '11.15.0';
+
+    inputs['node-version'] = versionSpec;
+    inputs['always-auth'] = false;
+    inputs['token'] = 'faketoken';
+
+    // ... but not in the local cache
+    findSpy.mockImplementation(() => '');
+
+    dlSpy.mockImplementationOnce(async () => {
+      throw new tc.HTTPError(404);
+    });
+
+    await main.run();
+
+    expect(getManifestSpy).toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalledWith(
+      `Attempting to download ${versionSpec}...`
+    );
+    expect(logSpy).toHaveBeenCalledWith(
+      'Not found in manifest. Falling back to download directly from Node'
+    );
+    expect(dlSpy).toHaveBeenCalled();
+    expect(warningSpy).toHaveBeenCalledWith(
+      `Node version ${versionSpec} for platform ${os.platform} and architecture ${os.arch} was found but failed to download. ` +
+        'This usually happens when downloadable binaries are not fully updated at https://nodejs.org/. ' +
+        'To resolve this issue you may either fall back to the older version or try again later.'
+    );
   });
 
   it('acquires specified architecture of node', async () => {
@@ -790,4 +865,46 @@ describe('setup-node', () => {
       }
     );
   });
+
+  it('acquires specified architecture of node from mirror', async () => {
+    for (const {arch, version, osSpec} of [
+      {arch: 'x86', version: '12.16.2', osSpec: 'win32'},
+      {arch: 'x86', version: '14.0.0', osSpec: 'win32'}
+    ]) {
+      os.platform = osSpec;
+      os.arch = arch;
+      const fileExtension = os.platform === 'win32' ? '7z' : 'tar.gz';
+      const platform = {
+        linux: 'linux',
+        darwin: 'darwin',
+        win32: 'win'
+      }[os.platform];
+
+      inputs['node-version'] = version;
+      inputs['architecture'] = arch;
+      inputs['always-auth'] = false;
+      inputs['token'] = 'faketoken';
+      inputs['mirror'] = 'https://my_mirror_url';
+      inputs['mirror-token'] = 'faketoken';
+
+      const expectedUrl =
+        arch === 'x64'
+          ? `https://github.com/actions/node-versions/releases/download/${version}/node-${version}-${platform}-${arch}.zip`
+          : `https://my_mirror_url/dist/v${version}/node-v${version}-${platform}-${arch}.${fileExtension}`;
+
+      // ... but not in the local cache
+      findSpy.mockImplementation(() => '');
+
+      dlSpy.mockImplementation(async () => '/some/temp/path');
+      const toolPath = path.normalize(`/cache/node/${version}/${arch}`);
+      exSpy.mockImplementation(async () => '/some/other/temp/path');
+      cacheSpy.mockImplementation(async () => toolPath);
+
+      await main.run();
+      expect(dlSpy).toHaveBeenCalled();
+      expect(logSpy).toHaveBeenCalledWith(
+        `Acquiring ${version} - ${arch} from ${expectedUrl}`
+      );
+    }
+  }, 100000);
 });

@@ -1,3 +1,4 @@
+import {v4 as uuidv4} from 'uuid';
 import * as tc from '@actions/tool-cache';
 import * as hc from '@actions/http-client';
 import * as core from '@actions/core';
@@ -23,7 +24,7 @@ export default abstract class BaseDistribution {
     });
   }
 
-  protected abstract getDistributionUrl(): string;
+  protected abstract getDistributionUrl(mirror: string): string;
 
   public async setupNodeJs() {
     let nodeJsVersions: INodeVersion[] | undefined;
@@ -96,10 +97,19 @@ export default abstract class BaseDistribution {
   }
 
   protected async getNodeJsVersions(): Promise<INodeVersion[]> {
-    const initialUrl = this.getDistributionUrl();
+    const initialUrl = this.getDistributionUrl(this.nodeInfo.mirror);
     const dataUrl = `${initialUrl}/index.json`;
 
-    const response = await this.httpClient.getJson<INodeVersion[]>(dataUrl);
+    const headers = {};
+
+    if (this.nodeInfo.mirrorToken) {
+      headers['Authorization'] = `Bearer ${this.nodeInfo.mirrorToken}`;
+    }
+
+    const response = await this.httpClient.getJson<INodeVersion[]>(
+      dataUrl,
+      headers
+    );
     return response.result || [];
   }
 
@@ -111,8 +121,12 @@ export default abstract class BaseDistribution {
         ? `node-v${version}-win-${osArch}`
         : `node-v${version}-${this.osPlat}-${osArch}`;
     const urlFileName: string =
-      this.osPlat == 'win32' ? `${fileName}.7z` : `${fileName}.tar.gz`;
-    const initialUrl = this.getDistributionUrl();
+      this.osPlat == 'win32'
+        ? this.nodeInfo.arch === 'arm64'
+          ? `${fileName}.zip`
+          : `${fileName}.7z`
+        : `${fileName}.tar.gz`;
+    const initialUrl = this.getDistributionUrl(this.nodeInfo.mirror);
     const url = `${initialUrl}/v${version}/${urlFileName}`;
 
     return <INodeVersionInfo>{
@@ -129,7 +143,11 @@ export default abstract class BaseDistribution {
       `Acquiring ${info.resolvedVersion} - ${info.arch} from ${info.downloadUrl}`
     );
     try {
-      downloadPath = await tc.downloadTool(info.downloadUrl);
+      downloadPath = await tc.downloadTool(
+        info.downloadUrl,
+        undefined,
+        this.nodeInfo.mirrorToken
+      );
     } catch (err) {
       if (
         err instanceof tc.HTTPError &&
@@ -145,14 +163,14 @@ export default abstract class BaseDistribution {
       throw err;
     }
 
-    const toolPath = await this.extractArchive(downloadPath, info);
+    const toolPath = await this.extractArchive(downloadPath, info, true);
     core.info('Done');
 
     return toolPath;
   }
 
   protected validRange(versionSpec: string) {
-    let options: semver.Options | undefined;
+    let options: semver.RangeOptions | undefined;
     const c = semver.clean(versionSpec) || '';
     const valid = semver.valid(c) ?? versionSpec;
 
@@ -163,12 +181,11 @@ export default abstract class BaseDistribution {
     version: string,
     arch: string = os.arch()
   ): Promise<string> {
-    const initialUrl = this.getDistributionUrl();
+    const initialUrl = this.getDistributionUrl(this.nodeInfo.mirror);
     const osArch: string = this.translateArchToDistUrl(arch);
 
-    // Create temporary folder to download in to
-    const tempDownloadFolder: string =
-      'temp_' + Math.floor(Math.random() * 2000000000);
+    // Create temporary folder to download to
+    const tempDownloadFolder = `temp_${uuidv4()}`;
     const tempDirectory = process.env['RUNNER_TEMP'] || '';
     assert.ok(tempDirectory, 'Expected RUNNER_TEMP to be defined');
     const tempDir: string = path.join(tempDirectory, tempDownloadFolder);
@@ -181,18 +198,34 @@ export default abstract class BaseDistribution {
 
       core.info(`Downloading only node binary from ${exeUrl}`);
 
-      const exePath = await tc.downloadTool(exeUrl);
+      const exePath = await tc.downloadTool(
+        exeUrl,
+        undefined,
+        this.nodeInfo.mirrorToken
+      );
       await io.cp(exePath, path.join(tempDir, 'node.exe'));
-      const libPath = await tc.downloadTool(libUrl);
+      const libPath = await tc.downloadTool(
+        libUrl,
+        undefined,
+        this.nodeInfo.mirrorToken
+      );
       await io.cp(libPath, path.join(tempDir, 'node.lib'));
     } catch (err) {
       if (err instanceof tc.HTTPError && err.httpStatusCode == 404) {
         exeUrl = `${initialUrl}/v${version}/node.exe`;
         libUrl = `${initialUrl}/v${version}/node.lib`;
 
-        const exePath = await tc.downloadTool(exeUrl);
+        const exePath = await tc.downloadTool(
+          exeUrl,
+          undefined,
+          this.nodeInfo.mirrorToken
+        );
         await io.cp(exePath, path.join(tempDir, 'node.exe'));
-        const libPath = await tc.downloadTool(libUrl);
+        const libPath = await tc.downloadTool(
+          libUrl,
+          undefined,
+          this.nodeInfo.mirrorToken
+        );
         await io.cp(libPath, path.join(tempDir, 'node.lib'));
       } else {
         throw err;
@@ -206,7 +239,8 @@ export default abstract class BaseDistribution {
 
   protected async extractArchive(
     downloadPath: string,
-    info: INodeVersionInfo | null
+    info: INodeVersionInfo | null,
+    isOfficialArchive?: boolean
   ) {
     //
     // Extract
@@ -215,12 +249,24 @@ export default abstract class BaseDistribution {
     let extPath: string;
     info = info || ({} as INodeVersionInfo); // satisfy compiler, never null when reaches here
     if (this.osPlat == 'win32') {
-      const _7zPath = path.join(__dirname, '../..', 'externals', '7zr.exe');
-      extPath = await tc.extract7z(downloadPath, undefined, _7zPath);
+      const extension = this.nodeInfo.arch === 'arm64' ? '.zip' : '.7z';
+      // Rename archive to add extension because after downloading
+      // archive does not contain extension type and it leads to some issues
+      // on Windows runners without PowerShell Core.
+      //
+      // For default PowerShell Windows it should contain extension type to unpack it.
+      if (extension === '.zip' && isOfficialArchive) {
+        const renamedArchive = `${downloadPath}.zip`;
+        fs.renameSync(downloadPath, renamedArchive);
+        extPath = await tc.extractZip(renamedArchive);
+      } else {
+        const _7zPath = path.join(__dirname, '../..', 'externals', '7zr.exe');
+        extPath = await tc.extract7z(downloadPath, undefined, _7zPath);
+      }
       // 7z extracts to folder matching file name
       const nestedPath = path.join(
         extPath,
-        path.basename(info.fileName, '.7z')
+        path.basename(info.fileName, extension)
       );
       if (fs.existsSync(nestedPath)) {
         extPath = nestedPath;
@@ -260,7 +306,11 @@ export default abstract class BaseDistribution {
         dataFileName = `osx-${osArch}-tar`;
         break;
       case 'win32':
-        dataFileName = `win-${osArch}-exe`;
+        if (this.nodeInfo.arch === 'arm64') {
+          dataFileName = `win-${osArch}-zip`;
+        } else {
+          dataFileName = `win-${osArch}-exe`;
+        }
         break;
       default:
         throw new Error(`Unexpected OS '${this.osPlat}'`);
